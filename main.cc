@@ -32,7 +32,43 @@ inline constexpr pixel COLOURISE(double iter) {
 }
 
 void renderFrame(animation &frames, unsigned int t, unsigned int offset) {
-  // TODO - render frame t and store in frames[t-offset]
+
+  // Code voor het getal C dat we gebruiken in de formule z = z² + c.
+  double a = 2 * std::numbers::pi * t / CYCLE_FRAMES;
+  double r = 0.7885;
+  std::complex<double> c = r * cos(a) + 1i * r * sin(a);
+
+  // Loop over alle pixels (x, y) in het frame
+  for (unsigned int y = 0; y < HEIGHT; y++) {
+    for (unsigned int x = 0; x < WIDTH; x++) {
+
+      // Code voor het bepalen van het startpunt z
+      double x_y_range = 2;
+      double scale = 1.5 - 1.45 * log(1 + 9.0 * t / FRAMES) / log(10);    // iets interessanter om naar te kijken
+
+      std::complex<double> z = 2 * x_y_range * std::complex(static_cast<double>(x)/WIDTH, static_cast<double>(y)/HEIGHT)
+          - std::complex(x_y_range*3/4, x_y_range);
+
+      z *= scale;
+
+
+      // Herhaal z = z² + c totdat z "ontsnapt" of we MAX_ITER halen.
+      int iter = 0; // telt hoe vaak we de update uitvoeren.
+
+      while (std::norm(z) < x_y_range && iter < MAX_ITER) {
+        z = z * z + c;
+        iter++;
+      }
+
+      // Als we MAX_ITER halen, kleuren we zwart.
+      // Anders geven we een kleur op basis van iter
+      if (iter == MAX_ITER) {
+        frames[t - offset].set_colour(x, y, {0, 0, 0});
+      } else {
+        frames[t - offset].set_colour(x, y, COLOURISE(iter));
+      }
+    }
+  }
 }
 
 int main (int argc, char *argv[]) {

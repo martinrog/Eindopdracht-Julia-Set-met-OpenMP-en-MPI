@@ -38,6 +38,7 @@ void renderFrame(animation &frames, unsigned int t, unsigned int offset) {
   double r = 0.7885;
   std::complex<double> c = r * cos(a) + 1i * r * sin(a);
 
+  #pragma omp parallel for // OpenMP parallelisatie van de loop over pixels. We hebben een nested loop dus dit geldt alleen voor de buitenste loop.
   // Loop over alle pixels (x, y) in het frame
   for (unsigned int y = 0; y < HEIGHT; y++) {
     for (unsigned int x = 0; x < WIDTH; x++) {
@@ -73,29 +74,117 @@ void renderFrame(animation &frames, unsigned int t, unsigned int offset) {
 
 int main (int argc, char *argv[]) {
   MPI_Init(&argc, &argv);
+  
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank); // houdt bij welk proces we zijn
+  MPI_Comm_size(MPI_COMM_WORLD, &size); // houdt bij hoeveel processen er zijn
+
+  // Bereken welk frameblok dit proces krijgt
+  unsigned int base = FRAMES / size; //hoeveel frames krijgt elk proces
+  unsigned int rest = FRAMES % size; //hoeveel frames blijven over indien we de frames niet netjes kunnen verdelen
+
+  unsigned int local_count;
+  unsigned int start;
+
+  if ((unsigned int)rank < rest) { // de eerste 'rest' processen krijgen 1 frame extra
+    local_count = base + 1; // hoeveel frames krijgt dit proces
+    start = rank * local_count; // welk frame is het eerste frame dat dit proces moet renderen 
+  } else {
+    local_count = base; // hoeveel frames krijgt dit proces (geen extra frames)
+    start = rest * (base + 1) + (rank - rest) * base; // welk frame moeten we renderen: Kijkt eerst naar welke frames al zijn verdeeld onder de rest processen, en daarna naar welke frames dit proces moet renderen.
+  }
+  unsigned int end = start + local_count; // welk frame is het eerste frame dat dit proces niet meer hoeft te renderen (dus: het frame na het laatste frame dat dit proces moet renderen)
+
+  // cout << "Rank " << rank
+  //     << " doet frames " << start
+  //     << " t/m " << (end - 1)
+  //     << " (" << local_count << " frames)" << endl;
 
   // Needed to send frames over MPI
   MPI_Datatype mpi_img;
   MPI_Type_contiguous(FRAME_SIZE, MPI_BYTE, &mpi_img);
   MPI_Type_commit(&mpi_img);
 
-  animation frames(FRAMES);
+  animation local_frames(local_count); // de fframes die het proces moet renderen
 
-  // TODO - parallellisation
-  for (unsigned int f = 0; f < FRAMES; f++) {
-    cout << endl << "Rendering frame " << f << endl;
-    renderFrame(frames, f, 0);
+  MPI_Barrier(MPI_COMM_WORLD); // wacht tot alle processen klaar zijn met bovenstaande setup voor een correcte meting
+  double start_time = MPI_Wtime();
+
+  // parallellisatie van het renderen
+  for (unsigned int f = start; f < end; f++) {
+    // cout << "Rank " << rank << " rendert frame " << f << endl;
+    renderFrame(local_frames, f, start);
   }
 
-  cimg_library::CImg<byte> img(WIDTH,HEIGHT,FRAMES,3);
-  cimg_forXYZ(img, x, y, z) { 
-    img(x,y,z,RED) = (frames)[z].get_channel(x,y,RED);
-    img(x,y,z,GREEN) = (frames)[z].get_channel(x,y,GREEN);
-    img(x,y,z,BLUE) = (frames)[z].get_channel(x,y,BLUE);
+  animation all_frames;
+
+  // Alleen root heeft ruimte nodig voor alle frames
+  if (rank == 0) {
+    all_frames.initialise(FRAMES);
   }
 
-  std::string filename = std::string("animation.avi");
-  img.save_video(filename.c_str());
+  // Root bereidt voor hoeveel frames van elk proces komen en waar ze moeten komen
+  int* recvcounts = nullptr; // Aantal frames dat elk proces stuurt naar root
+  int* displs = nullptr; // De positie waar alle stukken terecht moeten komen
+
+
+  // Hieronder eigenlijk hetzelfde idee als bij rank, maar nu voor frames in plaats van processen.
+  if (rank == 0) {
+    recvcounts = new int[size];
+    displs = new int[size];
+
+    for (int p = 0; p < size; p++) {
+      unsigned int p_count;
+      unsigned int p_start;
+
+      if ((unsigned int)p < rest) {
+        p_count = base + 1;
+        p_start = p * p_count;
+      } else {
+        p_count = base;
+        p_start = rest * (base + 1) + (p - rest) * base;
+      }
+
+      recvcounts[p] = static_cast<int>(p_count);
+      displs[p] = static_cast<int>(p_start);
+    }
+  }
+
+  MPI_Gatherv(
+    local_frames.data(),                   // wat dit proces stuurt
+    static_cast<int>(local_count),         // hoeveel frames dit proces stuurt
+    mpi_img,                               // datatype van 1 frame
+    all_frames.data(),                     // waar root alles ontvangt
+    recvcounts,                            // hoeveel per proces
+    displs,                                // waar elk blok moet komen
+    mpi_img,                               // datatype van 1 frame
+    0,                                     // root = rank 0
+    MPI_COMM_WORLD
+  );
+
+  // Alleen root heeft na het gatheren alle frames,
+  // dus alleen root kan de volledige video opslaan.
+  if (rank == 0) {
+    cimg_library::CImg<byte> img(WIDTH, HEIGHT, FRAMES, 3);
+
+    cimg_forXYZ(img, x, y, z) {
+      img(x,y,z,RED) = all_frames[z].get_channel(x,y,RED);
+      img(x,y,z,GREEN) = all_frames[z].get_channel(x,y,GREEN);
+      img(x,y,z,BLUE) = all_frames[z].get_channel(x,y,BLUE);
+    }
+
+    std::string filename = std::string("animation.avi");
+    img.save_video(filename.c_str());
+
+    delete[] recvcounts;
+    delete[] displs;
+  }
+
+  double end_time = MPI_Wtime();
+
+  if (rank == 0) {
+  cout << "Totale tijd: " << (end_time - start_time) << " seconden" << endl;
+  }
 
   // Also needed to send frames over MPI
   MPI_Type_free(&mpi_img);

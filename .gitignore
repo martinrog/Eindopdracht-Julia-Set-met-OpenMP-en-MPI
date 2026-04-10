@@ -39,3 +39,15 @@
 
 # debug information files
 *.dwo
+
+# animation output
+*.avi
+
+# images and videos
+*.png
+*.gif
+*.mp4
+
+# executables
+julia
+ffmpeg
